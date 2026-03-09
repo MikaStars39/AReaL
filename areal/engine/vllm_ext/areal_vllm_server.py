@@ -124,7 +124,9 @@ async def areal_update_weight(request: UpdateWeightsRequest, raw_request: Reques
 
 
 @router.post("/areal_update_weights_lora")
-async def areal_update_weight_lora(request: UpdateWeightsRequestLora, raw_request: Request):
+async def areal_update_weight_lora(
+    request: UpdateWeightsRequestLora, raw_request: Request
+):
     logger.info(
         f"API server starts areal_update_weight_lora, lora_model_path-{request.lora_model_path}, lora_name-{request.lora_name}, lora_int_id-{request.lora_int_id}, base_model_name-{request.base_model_name}"
     )
@@ -160,11 +162,13 @@ async def areal_update_weight_lora_xccl(raw_request: Request):
 
 
 @router.post("/areal_init_weights_update_group")
-async def areal_init_weights_update_group(request: UpdateGroupRequest, raw_request: Request):
+async def areal_init_weights_update_group(
+    request: UpdateGroupRequest, raw_request: Request
+):
     logger.info("API server starts areal_init_weights_update_group")
     llm = raw_request.app.state.engine_client
     ret_list = await llm.collective_rpc(
-        "init_update_weight_group",
+        "areal_init_update_weight_group",
         args=(
             request.master_address,
             request.master_port,
@@ -184,7 +188,7 @@ async def areal_set_weight_meta_xccl(
     logger.info("API server starts areal_set_update_weight_meta_xccl")
     llm = raw_request.app.state.engine_client
     ret_list = await llm.collective_rpc(
-        "set_weight_meta",
+        "areal_set_weight_meta",
         args=(
             request.names,
             request.dtypes,
@@ -204,7 +208,7 @@ async def areal_set_weight_meta_xccl_lora(
     )
     llm = raw_request.app.state.engine_client
     ret_list = await llm.collective_rpc(
-        "set_weight_meta_lora",
+        "areal_set_weight_meta_lora",
         args=(
             request.names,
             request.dtypes,
@@ -313,7 +317,7 @@ def abort_all_reqs(self):
 
 def areal_injected_update_weight(self, path):
     self.abort_all_reqs()
-    return self.collective_rpc("update_weights", args=(path,))
+    return self.collective_rpc("areal_update_weights", args=(path,))
 
 
 def areal_injected_update_weight_lora(
@@ -321,7 +325,7 @@ def areal_injected_update_weight_lora(
 ):
     self.abort_all_reqs()
     return self.collective_rpc(
-        "update_weights_lora",
+        "areal_update_weights_lora",
         args=(
             lora_model_path,
             lora_name,
@@ -333,12 +337,12 @@ def areal_injected_update_weight_lora(
 
 def areal_injected_update_weight_xccl(self):
     self.abort_all_reqs()
-    return self.collective_rpc("update_weight_xccl")
+    return self.collective_rpc("areal_update_weight_xccl")
 
 
 def areal_injected_update_weight_lora_xccl(self):
     self.abort_all_reqs()
-    return self.collective_rpc("update_weight_lora_xccl")
+    return self.collective_rpc("areal_update_weight_lora_xccl")
 
 
 def finish_request(self, req_state: "RequestState"):
