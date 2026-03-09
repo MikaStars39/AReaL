@@ -113,8 +113,8 @@ def build_response(ret_list):
 
 
 @router.post("/areal_update_weights")
-async def update_weight(request: UpdateWeightsRequest, raw_request: Request):
-    logger.info(f"API server starts update_weight, {request.model_path}")
+async def areal_update_weight(request: UpdateWeightsRequest, raw_request: Request):
+    logger.info(f"API server starts areal_update_weight, {request.model_path}")
     llm = raw_request.app.state.engine_client
     ret_list = await llm.engine_core.call_utility_async(
         "areal_injected_update_weight",
@@ -124,9 +124,9 @@ async def update_weight(request: UpdateWeightsRequest, raw_request: Request):
 
 
 @router.post("/areal_update_weights_lora")
-async def update_weight_lora(request: UpdateWeightsRequestLora, raw_request: Request):
+async def areal_update_weight_lora(request: UpdateWeightsRequestLora, raw_request: Request):
     logger.info(
-        f"API server starts update_weight_lora, lora_model_path-{request.lora_model_path}, lora_name-{request.lora_name}, lora_int_id-{request.lora_int_id}, base_model_name-{request.base_model_name}"
+        f"API server starts areal_update_weight_lora, lora_model_path-{request.lora_model_path}, lora_name-{request.lora_name}, lora_int_id-{request.lora_int_id}, base_model_name-{request.base_model_name}"
     )
     llm = raw_request.app.state.engine_client
     ret_list = await llm.engine_core.call_utility_async(
@@ -140,8 +140,8 @@ async def update_weight_lora(request: UpdateWeightsRequestLora, raw_request: Req
 
 
 @router.post("/areal_update_weights_xccl")
-async def update_weight_xccl(raw_request: Request):
-    logger.info("API server starts update_weight")
+async def areal_update_weight_xccl(raw_request: Request):
+    logger.info("API server starts areal_update_weight_xccl")
     llm = raw_request.app.state.engine_client
     ret_list = await llm.engine_core.call_utility_async(
         "areal_injected_update_weight_xccl",
@@ -150,8 +150,8 @@ async def update_weight_xccl(raw_request: Request):
 
 
 @router.post("/areal_update_weights_lora_xccl")
-async def update_weight_lora_xccl(raw_request: Request):
-    logger.info("API server starts update_weight_lora via XCCL")
+async def areal_update_weight_lora_xccl(raw_request: Request):
+    logger.info("API server starts areal_update_weight_lora_xccl")
     llm = raw_request.app.state.engine_client
     ret_list = await llm.engine_core.call_utility_async(
         "areal_injected_update_weight_lora_xccl",
@@ -160,8 +160,8 @@ async def update_weight_lora_xccl(raw_request: Request):
 
 
 @router.post("/areal_init_weights_update_group")
-async def init_weights_update_group(request: UpdateGroupRequest, raw_request: Request):
-    logger.info("API server starts init_weights_update_group")
+async def areal_init_weights_update_group(request: UpdateGroupRequest, raw_request: Request):
+    logger.info("API server starts areal_init_weights_update_group")
     llm = raw_request.app.state.engine_client
     ret_list = await llm.collective_rpc(
         "init_update_weight_group",
@@ -178,10 +178,10 @@ async def init_weights_update_group(request: UpdateGroupRequest, raw_request: Re
 
 
 @router.post("/areal_set_update_weight_meta")
-async def set_weight_meta_xccl(
+async def areal_set_weight_meta_xccl(
     request: UpdateWeightsFromXcclRequest, raw_request: Request
 ):
-    logger.info("API server starts upload meta")
+    logger.info("API server starts areal_set_update_weight_meta_xccl")
     llm = raw_request.app.state.engine_client
     ret_list = await llm.collective_rpc(
         "set_weight_meta",
@@ -196,11 +196,11 @@ async def set_weight_meta_xccl(
 
 
 @router.post("/areal_set_update_weight_meta_lora")
-async def set_weight_meta_xccl_lora(
+async def areal_set_weight_meta_xccl_lora(
     request: UpdateWeightsFromXcclRequestLora, raw_request: Request
 ):
     logger.info(
-        f"API server starts upload lora meta for {request.lora_name} with id {request.lora_int_id}"
+        f"API server starts areal_set_update_weight_meta_lora for {request.lora_name} with id {request.lora_int_id}"
     )
     llm = raw_request.app.state.engine_client
     ret_list = await llm.collective_rpc(
@@ -223,8 +223,8 @@ async def set_weight_meta_xccl_lora(
 
 
 @router.post("/areal_pause_generation")
-async def pause_generation(raw_request: Request):
-    logger.info("API server starts pause_generation and aborts all requests")
+async def areal_pause_generation(raw_request: Request):
+    logger.info("API server starts areal_pause_generation and aborts all requests")
     llm = raw_request.app.state.engine_client
     # Abort all running and waiting requests
     _generation_run_event.clear()
@@ -233,8 +233,8 @@ async def pause_generation(raw_request: Request):
 
 
 @router.post("/areal_continue_generation")
-async def continue_generation(raw_request: Request):
-    logger.info("API server starts continue_generation")
+async def areal_continue_generation(raw_request: Request):
+    logger.info("API server starts areal_continue_generation")
     _generation_run_event.set()
     return to_json_response(True, "Generation continued")
 
