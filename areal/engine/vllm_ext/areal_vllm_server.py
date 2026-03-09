@@ -4,22 +4,17 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING
 
 import uvloop
-from fastapi import Depends, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
-from vllm.entrypoints.openai.api_server import (
+from vllm.entrypoints.openai.api_server import build_app as _original_build_app
+from vllm.entrypoints.openai.api_server import run_server
+from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
+from vllm.entrypoints.openai.completion.api_router import (
     create_completion as original_create_completion,
 )
-from vllm.entrypoints.openai.api_server import (
-    router,
-    run_server,
-    validate_json_request,
-)
-from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.openai.protocol import (
-    CompletionRequest,
-    ErrorResponse,
-    OpenAIBaseModel,
-)
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse, OpenAIBaseModel
+from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.utils import cli_env_setup, load_aware_call, with_cancellation
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -27,6 +22,9 @@ from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.metrics.stats import LoRARequestStates
 from vllm.v1.request import RequestStatus
+
+# AReaL's own router for custom endpoints (replaces vLLM's removed global router)
+router = APIRouter()
 
 if TYPE_CHECKING:
     from vllm.v1.engine.output_processor import RequestState
@@ -389,7 +387,31 @@ hook()
 if __name__ == "__main__":
     # NOTE(simon):
     # This section should be in sync with vllm/entrypoints/cli/main.py for CLI
-    # entrypoints.f
+    # entrypoints.
+    import vllm.entrypoints.openai.api_server as _api_server_module
+
+    def _areal_build_app(args, supported_tasks=None):
+        """Monkey-patched build_app that replaces vLLM's /v1/completions route
+        with AReaL's wrapped version and adds AReaL custom endpoints."""
+        app = _original_build_app(args, supported_tasks=supported_tasks)
+        # Remove vLLM's /v1/completions POST route so AReaL's takes precedence
+        app.router.routes = [
+            route
+            for route in app.router.routes
+            if not (
+                hasattr(route, "path")
+                and route.path == "/v1/completions"
+                and hasattr(route, "methods")
+                and "POST" in route.methods
+            )
+        ]
+        # Include AReaL's router with custom endpoints + overridden /v1/completions
+        app.include_router(router)
+        return app
+
+    # Patch build_app so run_server uses our version
+    _api_server_module.build_app = _areal_build_app
+
     cli_env_setup()
     parser = FlexibleArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server."
