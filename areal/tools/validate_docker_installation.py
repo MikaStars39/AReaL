@@ -4,7 +4,7 @@ Docker Installation Validation Script for AReaL
 
 This script validates dependencies in the Docker environment, which includes
 additional packages (grouped_gemm, apex, transformer_engine, flash_attn_3)
-and flash-attn version 2.8.1 (installed separately in Dockerfile).
+and flash-attn version 2.8.3 (installed separately in Dockerfile).
 
 Also validates DeepSeek-V3 related packages:
 - FlashMLA: Multi-head Latent Attention (requires SM90+ GPU)
@@ -74,8 +74,8 @@ class DockerInstallationValidator(BaseInstallationValidator):
         super().parse_pyproject()
 
         # Add flash-attn (installed separately in Dockerfile, not in pyproject.toml)
-        self.add_additional_package("flash-attn", "==2.8.1", required=True)
-        print("  Note: Expecting flash-attn version 2.8.1 for Docker environment")
+        self.add_additional_package("flash-attn", "==2.8.3", required=True)
+        print("  Note: Expecting flash-attn version 2.8.3 for Docker environment")
 
         # Add Docker-specific packages not in pyproject.toml
         self.add_additional_package("grouped_gemm", required=True)

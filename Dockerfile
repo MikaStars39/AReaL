@@ -140,6 +140,46 @@ RUN git clone https://github.com/fla-org/flash-linear-attention /flash-linear-at
     && uv pip install -v . \
     && rm -rf /flash-linear-attention
 
+# flash-attn 2: download pre-built wheel, strip local version, repack & install
+RUN set -ex \
+    && FA_VER="2.8.3" \
+    && FA_RELEASE="v0.7.16" \
+    && if [ "$VARIANT" = "vllm" ]; then TORCH_TAG="torch2.10"; else TORCH_TAG="torch2.9"; fi \
+    && PY_TAG=$(python3 -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')") \
+    && LOCAL="+cu128${TORCH_TAG}" \
+    && WHL="flash_attn-${FA_VER}${LOCAL}-${PY_TAG}-${PY_TAG}-linux_x86_64.whl" \
+    && URL="https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/${FA_RELEASE}/${WHL}" \
+    && WORK="/tmp/flash-attn-repack" \
+    && mkdir -p "$WORK" \
+    && curl -fSL --retry 3 -o "$WORK/$WHL" "$URL" \
+    && $VIRTUAL_ENV/bin/wheel unpack "$WORK/$WHL" -d "$WORK/unpacked" \
+    && SRC="$WORK/unpacked/flash_attn-${FA_VER}${LOCAL}" \
+    && sed -i "s/^Version: .*/Version: ${FA_VER}/" "$SRC/flash_attn-${FA_VER}${LOCAL}.dist-info/METADATA" \
+    && mv "$SRC/flash_attn-${FA_VER}${LOCAL}.dist-info" "$SRC/flash_attn-${FA_VER}.dist-info" \
+    && mv "$SRC" "$WORK/unpacked/flash_attn-${FA_VER}" \
+    && $VIRTUAL_ENV/bin/wheel pack "$WORK/unpacked/flash_attn-${FA_VER}" -d "$WORK" \
+    && uv pip install "$WORK/flash_attn-${FA_VER}-${PY_TAG}-${PY_TAG}-linux_x86_64.whl" --no-build-isolation \
+    && rm -rf "$WORK"
+
+# flash-attn-3: install pre-built wheel (C extension only) + Python interface from source
+RUN set -ex \
+    && FA3_VER="3.0.0" \
+    && FA3_RELEASE="v0.8.2" \
+    && FA3_SRC_TAG="v2.8.3" \
+    && if [ "$VARIANT" = "vllm" ]; then TORCH_TAG="torch2.10"; else TORCH_TAG="torch2.9"; fi \
+    && LOCAL="+cu128${TORCH_TAG}gite2743ab" \
+    && WHL="flash_attn_3-${FA3_VER}${LOCAL}-cp39-abi3-linux_x86_64.whl" \
+    && URL="https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/${FA3_RELEASE}/${WHL}" \
+    && curl -fSL --retry 3 -o "/tmp/${WHL}" "$URL" \
+    && uv pip install "/tmp/${WHL}" --no-build-isolation \
+    && rm -f "/tmp/${WHL}" \
+    && PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')") \
+    && SITE_PKG="$VIRTUAL_ENV/lib/python${PY_VER}/site-packages/flash_attn_3" \
+    && mkdir -p "$SITE_PKG" \
+    && curl -fSL --retry 3 -o "$SITE_PKG/flash_attn_interface.py" \
+       "https://raw.githubusercontent.com/Dao-AILab/flash-attention/${FA3_SRC_TAG}/hopper/flash_attn_interface.py" \
+    && touch "$SITE_PKG/__init__.py"
+
 ##############################################################
 # STAGE 2.5: Install Node.js and npm-based tools
 ##############################################################
@@ -171,7 +211,7 @@ RUN curl -fsSL https://fnm.vercel.app/install | bash -s -- --install-dir "$FNM_D
 # VARIANT selects the inference backend (sglang or vllm)
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv pip install --no-build-isolation -r pyproject.toml --extra cuda-${VARIANT} --group dev
+    uv pip install --no-build-isolation -r pyproject.toml --extra cuda-train --extra ${VARIANT} --group dev
 
 ##############################################################
 # STAGE 4: Misc fixes and final setup
