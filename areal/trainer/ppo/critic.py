@@ -8,6 +8,7 @@ from areal.api.engine_api import TrainEngine
 from areal.infra import TrainController
 from areal.utils import stats_tracker
 from areal.utils.data import split_padded_tensor_dict_into_mb_list
+from areal.utils.datapack import batch_to_traj_list, traj_list_to_batch
 from areal.utils.functional import ppo_critic_loss_fn
 from areal.utils.perf_tracer import trace_perf
 
@@ -17,18 +18,39 @@ class PPOCritic:
         self.config = config
         self.engine = engine
 
+    def pre_hook(self, data: list[dict[str, Any]]) -> tuple[dict[str, Any], int]:
+        """Concat list[dict] trajectories into a single batched dict.
+
+        Returns
+        -------
+        tuple[dict[str, Any], int]
+            (batched_dict, traj_batch_size) where traj_batch_size is
+            each trajectory's shape[0] (= group_size).
+        """
+        return traj_list_to_batch(data)
+
+    def post_hook(
+        self, result: Any, n_trajs: int, traj_batch_size: int = 1
+    ) -> list[Any] | None:
+        """Split batched result back into per-trajectory list."""
+        return batch_to_traj_list(result, n_trajs, traj_batch_size)
+
     @trace_perf("ppo_critic.compute_values", category="compute")
     @torch.no_grad()
-    def compute_values(self, data: dict[str, Any]) -> torch.Tensor:
+    def compute_values(self, data: list[dict[str, Any]]) -> list[torch.Tensor]:
+        n_trajs = len(data)
+        data, traj_batch_size = self.pre_hook(data)
         self.engine.eval()
-        return self.engine.forward(
+        result = self.engine.forward(
             input_=data,
             aggregate_fn=lambda xs: torch.cat([x.squeeze(-1) for x in xs], dim=-1),
         )
+        return self.post_hook(result, n_trajs, traj_batch_size)
 
     @trace_perf("ppo_critic.ppo_update", category="compute")
     @stats_tracker.scope_func_wrapper("ppo_critic")
-    def ppo_update(self, data: dict[str, Any]) -> None:
+    def ppo_update(self, data: list[dict[str, Any]]) -> None:
+        data, _traj_batch_size = self.pre_hook(data)
         ########## Logging code starts ##########
         scalars = dict(
             mask_no_eos_with_zero=self.config.mask_no_eos_with_zero,

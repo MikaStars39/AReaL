@@ -33,6 +33,10 @@ from areal.utils.data import (
     broadcast_tensor_container,
     tensor_container_to,
 )
+from areal.utils.datapack import (
+    _aggregate_traj_rtensor_layouts,
+    concat_traj_results,
+)
 from areal.utils.dynamic_import import import_from_string
 from areal.utils.network import find_free_ports, gethostip
 
@@ -662,7 +666,7 @@ def call_engine_method():
         raw_args = deserialize_value(raw_args)
         raw_kwargs = deserialize_value(raw_kwargs)
 
-        # Fetch remote tensors if any
+        # Fetch remote tensors
         args = RTensor.localize(raw_args)
         kwargs = RTensor.localize(raw_kwargs)
 
@@ -689,6 +693,7 @@ def call_engine_method():
                         src_rank=engine.current_data_parallel_head(),
                         group=engine.context_and_model_parallel_group,
                     )
+
                     args_bcast = tensor_container_to(
                         args, current_platform.current_device()
                     )
@@ -765,7 +770,6 @@ def call_engine_method():
                 )
                 raise
 
-        # Submit to engine thread
         try:
             result = _submit_to_engine_thread(
                 f"call_{method_name}", execute_in_engine_thread
@@ -784,18 +788,42 @@ def call_engine_method():
                 500,
             )
 
-        # Convert all tensors to RTensors and store the tensor locally
-        layout = RTensor.extract_layout(
-            result,
-            layouts=dict(args=raw_args, kwargs=raw_kwargs),
-            node_addr=f"{_server_host}:{_server_port}",
-        )
-        if layout is not None:
-            result = RTensor.remotize(
+        # Convert result tensors to RTensors for remote storage.
+        # For TrainEngine, keep per-traj list[dict] structure intact —
+        # each dict gets its own RTensor shard_ids so the controller
+        # can re-dispatch without data duplication.
+        if (
+            isinstance(engine, TrainEngine)
+            and isinstance(result, list)
+            and len(result) > 0
+            and isinstance(result[0], dict)
+        ):
+            # Per-trajectory remotize: each dict/tensor in the list gets its own shard_ids
+            from areal.infra.rpc.rpc_utils import remotize_traj_list
+
+            node_addr = f"{_server_host}:{_server_port}"
+            result = remotize_traj_list(result, node_addr=node_addr)
+        else:
+            # Original path for InferenceEngine or non-list results
+            if isinstance(engine, TrainEngine):
+                result = concat_traj_results(result)
+                layout_source = dict(
+                    args=_aggregate_traj_rtensor_layouts(raw_args),
+                    kwargs=_aggregate_traj_rtensor_layouts(raw_kwargs),
+                )
+            else:
+                layout_source = dict(args=raw_args, kwargs=raw_kwargs)
+            layout = RTensor.extract_layout(
                 result,
-                layout,
+                layouts=layout_source,
                 node_addr=f"{_server_host}:{_server_port}",
             )
+            if layout is not None:
+                result = RTensor.remotize(
+                    result,
+                    layout,
+                    node_addr=f"{_server_host}:{_server_port}",
+                )
         serialized_result = serialize_value(result)
         return jsonify({"status": "success", "result": serialized_result})
 

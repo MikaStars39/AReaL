@@ -13,6 +13,10 @@ from areal.utils.data import (
     broadcast_tensor_container,
     tensor_container_to,
 )
+from areal.utils.datapack import (
+    _aggregate_traj_rtensor_layouts,
+    concat_traj_results,
+)
 from areal.utils.dynamic_import import import_from_string
 from areal.utils.network import find_free_ports
 
@@ -117,7 +121,7 @@ class RayRPCServer:
 
         raw_args = list(args)
         raw_kwargs = kwargs.copy()
-        # fetch remote tensors if any
+        # Fetch remote tensors
         args = RTensor.localize(raw_args)
         kwargs = RTensor.localize(raw_kwargs)
 
@@ -160,12 +164,33 @@ class RayRPCServer:
             result = fn(*args, **kwargs)
             if isinstance(result, Future):
                 result = result.result()
-            # Convert all tensors to RTensors and store the tensor locally
-            layout = RTensor.extract_layout(
-                result, layouts=dict(args=raw_args, kwargs=raw_kwargs), node_addr=""
-            )
-            if layout is not None:
-                result = RTensor.remotize(result, layout, node_addr="")
+            # Convert result tensors to RTensors for remote storage.
+            # For TrainEngine with list results, keep per-traj structure intact
+            # so each dict gets its own shard_ids (avoids data duplication in controller).
+            if (
+                isinstance(engine, TrainEngine)
+                and isinstance(result, list)
+                and len(result) > 0
+                and isinstance(result[0], dict)
+            ):
+                # Per-trajectory remotize: each dict/tensor in the list gets its own shard_ids
+                from areal.infra.rpc.rpc_utils import remotize_traj_list
+
+                result = remotize_traj_list(result, node_addr="")
+            else:
+                if isinstance(engine, TrainEngine):
+                    result = concat_traj_results(result)
+                    layout_source = dict(
+                        args=_aggregate_traj_rtensor_layouts(raw_args),
+                        kwargs=_aggregate_traj_rtensor_layouts(raw_kwargs),
+                    )
+                else:
+                    layout_source = dict(args=raw_args, kwargs=raw_kwargs)
+                layout = RTensor.extract_layout(
+                    result, layouts=layout_source, node_addr=""
+                )
+                if layout is not None:
+                    result = RTensor.remotize(result, layout, node_addr="")
             # put back to cpu to mimic RPCServer encode/decode
             result = tensor_container_to(result, "cpu")
             self.logger.debug(f"Successfully completed RayRPCServer call {result}")

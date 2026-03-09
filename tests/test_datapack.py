@@ -11,7 +11,17 @@ from areal.api.engine_api import TrainEngine
 from areal.api.io_struct import AllocationMode
 from areal.infra import TrainController
 from areal.infra.rpc.rtensor import RTensor, TensorShardInfo
-from areal.utils.datapack import balanced_greedy_partition, ffd_allocate
+from areal.utils.datapack import (
+    _aggregate_traj_rtensor_layouts,
+    _concat_localized_traj_lists,
+    balanced_greedy_partition,
+    concat_traj_dicts,
+    concat_traj_results,
+    data_parallel_merge,
+    dispatch_traj_list,
+    ffd_allocate,
+    split_result_to_traj_list,
+)
 
 # =============================================================================
 # Test Data Generators
@@ -448,45 +458,42 @@ class TestFFDAllocate:
 
 
 # =============================================================================
-# Integration Tests: RTensor Data Parallel Dispatch
+# Integration Tests: dispatch_traj_list
 # =============================================================================
 
 
-class TestRTensorDataParallelDispatchIntegration:
-    """Integration tests for RTensor.data_parallel_dispatch with balanced_greedy_partition.
+class TestDispatchTrajList:
+    """Integration tests for dispatch_traj_list with balanced_greedy_partition.
 
-    These tests verify that global batches are split into equal sizes for different
-    DP ranks when processed through the RTensor dispatch mechanism.
+    These tests verify that trajectory lists (list[dict[str, RTensor]]) are
+    partitioned into equal-size groups for different DP ranks.
     """
 
-    def _create_rtensor_with_seqlens(self, seqlens: list[int]):
-        """Helper to create an RTensor with specified sequence lengths."""
-        shards = [
-            TensorShardInfo(size=1, seqlens=[slen], shard_id=str(i), node_addr="")
-            for i, slen in enumerate(seqlens)
-        ]
-        max_len = max(seqlens) if seqlens else 1
-        data = torch.zeros(len(seqlens), max_len)
-        return RTensor(shards=shards, data=data)
+    def _create_traj_list(self, seqlens: list[int]) -> list[dict[str, RTensor]]:
+        """Helper to create a list of trajectory dicts (one per sequence)."""
+        traj_list = []
+        for slen in seqlens:
+            shard = TensorShardInfo(
+                size=1, seqlens=[slen], shard_id="test", node_addr=""
+            )
+            data = torch.zeros(1, slen)
+            traj_list.append({"input_ids": RTensor(shard=shard, data=data)})
+        return traj_list
 
     @pytest.mark.parametrize("dp_size", [2, 4, 8])
     def test_equal_split_uniform_distribution(self, dp_size):
         """Test that uniform distribution splits into equal-size groups."""
-        n_seqs = dp_size * 16  # 16 sequences per DP rank
+        n_seqs = dp_size * 16
         seqlens = generate_uniform_seqlens(n=n_seqs, low=100, high=1000, seed=42)
-        rtensor = self._create_rtensor_with_seqlens(seqlens)
+        traj_list = self._create_traj_list(seqlens)
 
-        split_rtensors, group_indices = RTensor.data_parallel_dispatch(
-            rtensor, dp_size=dp_size
-        )
+        splits, group_indices = dispatch_traj_list(traj_list, dp_size=dp_size)
 
-        # Verify equal split sizes
-        assert group_indices is not None
-        assert len(split_rtensors) == dp_size
+        assert len(splits) == dp_size
         expected_size = n_seqs // dp_size
-        for i, rt in enumerate(split_rtensors):
-            assert len(rt.shards) == expected_size, (
-                f"DP rank {i} got {len(rt.shards)} shards, expected {expected_size}"
+        for i, group in enumerate(splits):
+            assert len(group) == expected_size, (
+                f"DP rank {i} got {len(group)} trajectories, expected {expected_size}"
             )
             assert len(group_indices[i]) == expected_size
 
@@ -501,106 +508,91 @@ class TestRTensorDataParallelDispatchIntegration:
             short_range=(100, 400),
             seed=42,
         )
-        rtensor = self._create_rtensor_with_seqlens(seqlens)
+        traj_list = self._create_traj_list(seqlens)
 
-        split_rtensors, group_indices = RTensor.data_parallel_dispatch(
-            rtensor, dp_size=dp_size
-        )
+        splits, group_indices = dispatch_traj_list(traj_list, dp_size=dp_size)
 
-        # Verify equal split sizes
         expected_size = n_seqs // dp_size
-        for i, rt in enumerate(split_rtensors):
-            assert len(rt.shards) == expected_size
+        for i, group in enumerate(splits):
+            assert len(group) == expected_size
 
     @pytest.mark.parametrize("dp_size", [2, 4, 8])
     def test_equal_split_skewed_distribution(self, dp_size):
         """Test that skewed distribution splits into equal-size groups."""
         n_seqs = dp_size * 24
         seqlens = generate_skewed_seqlens(n=n_seqs, max_len=2000, skew=3.0, seed=42)
-        rtensor = self._create_rtensor_with_seqlens(seqlens)
+        traj_list = self._create_traj_list(seqlens)
 
-        split_rtensors, group_indices = RTensor.data_parallel_dispatch(
-            rtensor, dp_size=dp_size
-        )
+        splits, group_indices = dispatch_traj_list(traj_list, dp_size=dp_size)
 
         expected_size = n_seqs // dp_size
-        for i, rt in enumerate(split_rtensors):
-            assert len(rt.shards) == expected_size
+        for i, group in enumerate(splits):
+            assert len(group) == expected_size
 
     @pytest.mark.parametrize("dp_size", [2, 4, 8])
     def test_equal_split_exponential_distribution(self, dp_size):
         """Test that exponential distribution splits into equal-size groups."""
         n_seqs = dp_size * 16
         seqlens = generate_exponential_seqlens(n=n_seqs, scale=500.0, seed=42)
-        rtensor = self._create_rtensor_with_seqlens(seqlens)
+        traj_list = self._create_traj_list(seqlens)
 
-        split_rtensors, group_indices = RTensor.data_parallel_dispatch(
-            rtensor, dp_size=dp_size
-        )
+        splits, group_indices = dispatch_traj_list(traj_list, dp_size=dp_size)
 
         expected_size = n_seqs // dp_size
-        for i, rt in enumerate(split_rtensors):
-            assert len(rt.shards) == expected_size
+        for i, group in enumerate(splits):
+            assert len(group) == expected_size
 
     @pytest.mark.parametrize("dp_size", [2, 4, 8])
     def test_equal_split_code_distribution(self, dp_size):
         """Test that code-like distribution splits into equal-size groups."""
         n_seqs = dp_size * 32
         seqlens = generate_code_seqlens(n=n_seqs, seed=42)
-        rtensor = self._create_rtensor_with_seqlens(seqlens)
+        traj_list = self._create_traj_list(seqlens)
 
-        split_rtensors, group_indices = RTensor.data_parallel_dispatch(
-            rtensor, dp_size=dp_size
-        )
+        splits, group_indices = dispatch_traj_list(traj_list, dp_size=dp_size)
 
         expected_size = n_seqs // dp_size
-        for i, rt in enumerate(split_rtensors):
-            assert len(rt.shards) == expected_size
+        for i, group in enumerate(splits):
+            assert len(group) == expected_size
 
     @pytest.mark.parametrize("dp_size", [2, 4, 8])
     def test_equal_split_chat_distribution(self, dp_size):
         """Test that chat-like distribution splits into equal-size groups."""
         n_seqs = dp_size * 24
         seqlens = generate_chat_seqlens(n=n_seqs, seed=42)
-        rtensor = self._create_rtensor_with_seqlens(seqlens)
+        traj_list = self._create_traj_list(seqlens)
 
-        split_rtensors, group_indices = RTensor.data_parallel_dispatch(
-            rtensor, dp_size=dp_size
-        )
+        splits, group_indices = dispatch_traj_list(traj_list, dp_size=dp_size)
 
         expected_size = n_seqs // dp_size
-        for i, rt in enumerate(split_rtensors):
-            assert len(rt.shards) == expected_size
+        for i, group in enumerate(splits):
+            assert len(group) == expected_size
 
     @pytest.mark.parametrize("dp_size", [2, 4, 8])
     def test_equal_split_math_distribution(self, dp_size):
         """Test that math problem distribution splits into equal-size groups."""
         n_seqs = dp_size * 16
         seqlens = generate_math_seqlens(n=n_seqs, seed=42)
-        rtensor = self._create_rtensor_with_seqlens(seqlens)
+        traj_list = self._create_traj_list(seqlens)
 
-        split_rtensors, group_indices = RTensor.data_parallel_dispatch(
-            rtensor, dp_size=dp_size
-        )
+        splits, group_indices = dispatch_traj_list(traj_list, dp_size=dp_size)
 
         expected_size = n_seqs // dp_size
-        for i, rt in enumerate(split_rtensors):
-            assert len(rt.shards) == expected_size
+        for i, group in enumerate(splits):
+            assert len(group) == expected_size
 
     @pytest.mark.parametrize("dp_size", [2, 4, 8])
     def test_equal_split_power_law_distribution(self, dp_size):
         """Test that power-law distribution splits into equal-size groups."""
         n_seqs = dp_size * 20
         seqlens = generate_power_law_seqlens(n=n_seqs, alpha=2.0, seed=42)
-        rtensor = self._create_rtensor_with_seqlens(seqlens)
+        traj_list = self._create_traj_list(seqlens)
 
-        split_rtensors, group_indices = RTensor.data_parallel_dispatch(
-            rtensor, dp_size=dp_size
-        )
+        splits, group_indices = dispatch_traj_list(traj_list, dp_size=dp_size)
 
         expected_size = n_seqs // dp_size
-        for i, rt in enumerate(split_rtensors):
-            assert len(rt.shards) == expected_size
+        for i, group in enumerate(splits):
+            assert len(group) == expected_size
 
     @pytest.mark.parametrize("seed", [42, 123, 456, 789, 1000, 2024, 3141, 9999])
     def test_equal_split_various_seeds(self, seed):
@@ -614,27 +606,23 @@ class TestRTensorDataParallelDispatchIntegration:
             short_range=(50, 300),
             seed=seed,
         )
-        rtensor = self._create_rtensor_with_seqlens(seqlens)
+        traj_list = self._create_traj_list(seqlens)
 
-        split_rtensors, group_indices = RTensor.data_parallel_dispatch(
-            rtensor, dp_size=dp_size
-        )
+        splits, group_indices = dispatch_traj_list(traj_list, dp_size=dp_size)
 
         expected_size = n_seqs // dp_size
-        for i, rt in enumerate(split_rtensors):
-            assert len(rt.shards) == expected_size
+        for i, group in enumerate(splits):
+            assert len(group) == expected_size
 
-    def test_all_indices_preserved_after_split(self):
+    def test_all_indices_preserved_after_dispatch(self):
         """Test that all original indices are preserved after dispatch."""
         dp_size = 4
         n_seqs = 100
         seqlens = generate_uniform_seqlens(n=n_seqs, low=100, high=500, seed=42)
-        rtensor = self._create_rtensor_with_seqlens(seqlens)
+        traj_list = self._create_traj_list(seqlens)
 
-        _, group_indices = RTensor.data_parallel_dispatch(rtensor, dp_size=dp_size)
-        assert group_indices is not None
+        _, group_indices = dispatch_traj_list(traj_list, dp_size=dp_size)
 
-        # All indices should be present exactly once
         all_indices = sorted(i for g in group_indices for i in g)
         assert all_indices == list(range(n_seqs))
 
@@ -648,17 +636,14 @@ class TestRTensorDataParallelDispatchIntegration:
             short_range=(100, 300),
             seed=42,
         )
-        rtensor = self._create_rtensor_with_seqlens(seqlens)
+        traj_list = self._create_traj_list(seqlens)
 
-        _, group_indices = RTensor.data_parallel_dispatch(rtensor, dp_size=dp_size)
-        assert group_indices is not None
+        _, group_indices = dispatch_traj_list(traj_list, dp_size=dp_size)
 
-        # Compute total tokens per rank
         tokens_per_rank = [sum(seqlens[i] for i in g) for g in group_indices]
         avg_tokens = sum(tokens_per_rank) / dp_size
         max_diff = max(tokens_per_rank) - min(tokens_per_rank)
 
-        # Token imbalance should be reasonable (< 30% of average)
         assert max_diff / avg_tokens < 0.3, (
             f"Token imbalance too high: {max_diff / avg_tokens:.2%}"
         )
@@ -677,62 +662,70 @@ class TestRTensorDataParallelDispatchIntegration:
     def test_large_batch_equal_split(self, batch_size, dp_size):
         """Test equal split for various large batch sizes."""
         seqlens = generate_uniform_seqlens(n=batch_size, low=100, high=2000, seed=42)
-        rtensor = self._create_rtensor_with_seqlens(seqlens)
+        traj_list = self._create_traj_list(seqlens)
 
-        split_rtensors, group_indices = RTensor.data_parallel_dispatch(
-            rtensor, dp_size=dp_size
-        )
+        splits, group_indices = dispatch_traj_list(traj_list, dp_size=dp_size)
 
         expected_size = batch_size // dp_size
-        for i, rt in enumerate(split_rtensors):
-            assert len(rt.shards) == expected_size
+        for i, group in enumerate(splits):
+            assert len(group) == expected_size
 
-    def test_dispatch_with_nested_dict(self):
-        """Test equal split when RTensor is in a nested dict structure."""
-        dp_size = 4
-        n_seqs = 64
+    def test_dispatch_preserves_trajectory_content(self):
+        """Test that dispatched trajectories contain the original dict content."""
+        dp_size = 2
+        seqlens = [100, 200, 300, 400]
+        traj_list = self._create_traj_list(seqlens)
+
+        splits, group_indices = dispatch_traj_list(traj_list, dp_size=dp_size)
+
+        # Every dispatched trajectory should be a dict with 'input_ids' RTensor
+        for group in splits:
+            for traj in group:
+                assert isinstance(traj, dict)
+                assert "input_ids" in traj
+                assert isinstance(traj["input_ids"], RTensor)
+
+    def test_dispatch_with_multi_key_trajectories(self):
+        """Test dispatch with trajectory dicts containing multiple RTensor keys."""
+        dp_size = 2
+        n_seqs = 8
         seqlens = generate_uniform_seqlens(n=n_seqs, low=100, high=500, seed=42)
-        rtensor = self._create_rtensor_with_seqlens(seqlens)
+        traj_list = []
+        for slen in seqlens:
+            shard = TensorShardInfo(
+                size=1, seqlens=[slen], shard_id="test", node_addr=""
+            )
+            traj_list.append(
+                {
+                    "input_ids": RTensor(shard=shard, data=torch.zeros(1, slen)),
+                    "labels": RTensor(shard=shard, data=torch.ones(1, slen)),
+                }
+            )
 
-        # Wrap in nested dict structure
-        nested_data = {
-            "input_ids": rtensor,
-            "metadata": {"batch_size": n_seqs, "dp_size": dp_size},
-        }
-
-        split_results, group_indices = RTensor.data_parallel_dispatch(
-            nested_data, dp_size=dp_size
-        )
+        splits, group_indices = dispatch_traj_list(traj_list, dp_size=dp_size)
 
         expected_size = n_seqs // dp_size
-        for i, result in enumerate(split_results):
-            assert len(result["input_ids"].shards) == expected_size
-            # Scalar values should be replicated
-            assert result["metadata"]["batch_size"] == n_seqs
+        for group in splits:
+            assert len(group) == expected_size
+            for traj in group:
+                assert "input_ids" in traj
+                assert "labels" in traj
 
-    def test_dispatch_with_multiple_rtensors(self):
-        """Test equal split when multiple RTensors share the same layout."""
-        dp_size = 4
-        n_seqs = 48
-        seqlens = generate_uniform_seqlens(n=n_seqs, low=100, high=500, seed=42)
+    def test_dispatch_fallback_for_non_rtensor_dicts(self):
+        """Test that dicts without RTensors get seqlen=1 fallback."""
+        dp_size = 2
+        traj_list = [
+            {"text": "hello"},
+            {"text": "world"},
+            {"text": "foo"},
+            {"text": "bar"},
+        ]
 
-        input_rtensor = self._create_rtensor_with_seqlens(seqlens)
-        # Create another RTensor with same shard structure
-        labels_rtensor = self._create_rtensor_with_seqlens(seqlens)
+        splits, group_indices = dispatch_traj_list(traj_list, dp_size=dp_size)
 
-        data = {
-            "input_ids": input_rtensor,
-            "labels": labels_rtensor,
-        }
-
-        split_results, group_indices = RTensor.data_parallel_dispatch(
-            data, dp_size=dp_size
-        )
-
-        expected_size = n_seqs // dp_size
-        for i, result in enumerate(split_results):
-            assert len(result["input_ids"].shards) == expected_size
-            assert len(result["labels"].shards) == expected_size
+        assert len(splits) == dp_size
+        total = sum(len(g) for g in splits)
+        assert total == 4
 
 
 class TestTrainControllerDispatchIntegration:
@@ -758,15 +751,16 @@ class TestTrainControllerDispatchIntegration:
             )
         )
 
-    def _create_rtensor_with_seqlens(self, seqlens: list[int]):
-        """Helper to create an RTensor with specified sequence lengths."""
-        shards = [
-            TensorShardInfo(size=1, seqlens=[slen], shard_id=str(i), node_addr="")
-            for i, slen in enumerate(seqlens)
-        ]
-        max_len = max(seqlens) if seqlens else 1
-        data = torch.zeros(len(seqlens), max_len)
-        return RTensor(shards=shards, data=data)
+    def _create_traj_list(self, seqlens: list[int]) -> list[dict[str, RTensor]]:
+        """Helper to create a list of trajectory dicts (one per sequence)."""
+        traj_list = []
+        for slen in seqlens:
+            shard = TensorShardInfo(
+                size=1, seqlens=[slen], shard_id="test", node_addr=""
+            )
+            data = torch.zeros(1, slen)
+            traj_list.append({"input_ids": RTensor(shard=shard, data=data)})
+        return traj_list
 
     @pytest.mark.parametrize("dp_size", [2, 4, 8])
     def test_train_controller_dispatch_equal_split(
@@ -795,9 +789,9 @@ class TestTrainControllerDispatchIntegration:
             short_range=(100, 300),
             seed=42,
         )
-        rtensor = self._create_rtensor_with_seqlens(seqlens)
+        traj_list = self._create_traj_list(seqlens)
 
-        split_args, split_kwargs, group_indices = controller._dispatch_inputs(rtensor)
+        split_args, split_kwargs, group_indices = controller._dispatch_inputs(traj_list)
 
         # Verify equal split
         expected_size = n_seqs // dp_size
@@ -848,9 +842,9 @@ class TestTrainControllerDispatchIntegration:
 
         n_seqs = dp_size * 20
         seqlens = generator_func(n_seqs, seed=42)
-        rtensor = self._create_rtensor_with_seqlens(seqlens)
+        traj_list = self._create_traj_list(seqlens)
 
-        _, _, group_indices = controller._dispatch_inputs(rtensor)
+        _, _, group_indices = controller._dispatch_inputs(traj_list)
 
         expected_size = n_seqs // dp_size
         for i, g in enumerate(group_indices):
@@ -879,9 +873,9 @@ class TestTrainControllerDispatchIntegration:
 
         n_seqs = 100
         seqlens = generate_uniform_seqlens(n=n_seqs, low=100, high=500, seed=42)
-        rtensor = self._create_rtensor_with_seqlens(seqlens)
+        traj_list = self._create_traj_list(seqlens)
 
-        _, _, group_indices = controller._dispatch_inputs(rtensor)
+        _, _, group_indices = controller._dispatch_inputs(traj_list)
 
         all_indices = sorted(i for g in group_indices for i in g)
         assert all_indices == list(range(n_seqs))
@@ -912,12 +906,527 @@ class TestTrainControllerDispatchIntegration:
             short_range=(100, 300),
             seed=seed,
         )
-        rtensor = self._create_rtensor_with_seqlens(seqlens)
+        traj_list = self._create_traj_list(seqlens)
 
-        _, _, group_indices1 = controller._dispatch_inputs(rtensor)
+        _, _, group_indices1 = controller._dispatch_inputs(traj_list)
 
         # Dispatch again with same data
-        rtensor2 = self._create_rtensor_with_seqlens(seqlens)
-        _, _, group_indices2 = controller._dispatch_inputs(rtensor2)
+        traj_list2 = self._create_traj_list(seqlens)
+        _, _, group_indices2 = controller._dispatch_inputs(traj_list2)
 
         assert group_indices1 == group_indices2
+
+
+class TestConcatTrajDicts:
+    """Test concat_traj_dicts and _concat_localized_traj_lists utilities."""
+
+    def test_concat_single_dict_returns_same(self):
+        d = {"x": torch.randn(2, 3)}
+        result = concat_traj_dicts([d])
+        assert result is d
+
+    def test_concat_two_dicts_pads_and_cats(self):
+        d1 = {"x": torch.ones(2, 3), "y": torch.ones(2, 5)}
+        d2 = {"x": torch.zeros(1, 4), "y": torch.zeros(1, 5)}
+        result = concat_traj_dicts([d1, d2])
+        assert result["x"].shape == (3, 4)  # padded to max dim-1
+        assert result["y"].shape == (3, 5)
+        assert torch.allclose(result["x"][:2, :3], torch.ones(2, 3))
+        assert torch.allclose(result["x"][2:, :4], torch.zeros(1, 4))
+
+    def test_concat_empty_returns_empty(self):
+        assert concat_traj_dicts([]) == {}
+
+    def test_concat_list_values(self):
+        d1 = {"ids": [1, 2]}
+        d2 = {"ids": [3, 4, 5]}
+        result = concat_traj_dicts([d1, d2])
+        assert result["ids"] == [1, 2, 3, 4, 5]
+
+    def test_concat_localized_traj_lists_walks_structure(self):
+        """_concat_localized_traj_lists concats list[dict] inside args."""
+        t1 = torch.randn(2, 3)
+        t2 = torch.randn(1, 3)
+        args = [
+            [{"x": t1}, {"x": t2}],  # traj list → should be concatenated
+            42,  # scalar → unchanged
+        ]
+        result = _concat_localized_traj_lists(args)
+        assert isinstance(result[0], dict)  # was list, now single dict
+        assert result[0]["x"].shape == (3, 3)
+        assert result[1] == 42
+
+    def test_concat_localized_traj_lists_concats_all_list_dicts(self):
+        """_concat_localized_traj_lists concats ANY list[dict], including non-tensor.
+
+        The guard against concatenating chat messages is at the call site
+        (rpc_server.py only calls this for TrainEngine), not in this function.
+        """
+        # Even message dicts get concatenated — caller must guard
+        messages = [{"role": "user", "content": "What is 2+2?"}]
+        result = _concat_localized_traj_lists(messages)
+        assert isinstance(result, dict)
+        assert result["role"] == "user"
+
+        # Tensor dicts also get concatenated
+        t1 = torch.randn(1, 10)
+        t2 = torch.randn(1, 10)
+        traj_list = [{"input_ids": t1}, {"input_ids": t2}]
+        result = _concat_localized_traj_lists(traj_list)
+        assert isinstance(result, dict)
+        assert result["input_ids"].shape == (2, 10)
+
+
+class TestAggregateTrajRtensorLayouts:
+    """Test _aggregate_traj_rtensor_layouts for correct seqlens aggregation."""
+
+    def test_aggregates_seqlens_from_traj_list(self):
+        """Simulates the RPC server receiving list[dict[str, RTensor]] from controller.
+
+        raw_args structure: [list[dict[str, RTensor]]]
+        After aggregation, extract_layout should find an RTensor with ALL seqlens.
+        """
+        # Build raw_args as the RPC server sees them after deserialization:
+        # [list_of_traj_dicts]  (positional args tuple)
+        traj0 = {
+            "input_ids": RTensor(
+                shard=TensorShardInfo(
+                    size=1, seqlens=[128], shard_id="a", node_addr="w0"
+                ),
+                data=torch.empty(0, device="meta"),
+            ),
+        }
+        traj1 = {
+            "input_ids": RTensor(
+                shard=TensorShardInfo(
+                    size=1, seqlens=[256], shard_id="b", node_addr="w0"
+                ),
+                data=torch.empty(0, device="meta"),
+            ),
+        }
+        traj2 = {
+            "input_ids": RTensor(
+                shard=TensorShardInfo(
+                    size=1, seqlens=[64], shard_id="c", node_addr="w0"
+                ),
+                data=torch.empty(0, device="meta"),
+            ),
+        }
+        raw_args = [[traj0, traj1, traj2]]  # [list[dict[str, RTensor]]]
+
+        result = _aggregate_traj_rtensor_layouts(raw_args)
+
+        # Should be [aggregated_RTensor]
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert isinstance(result[0], RTensor)
+        assert result[0].shard.seqlens == [128, 256, 64]
+        assert result[0].shard.size == 3
+
+    def test_end_to_end_merge_rejects_rtensors(self):
+        """RTensors should not be merged via data_parallel_merge (use _reorder_traj_results)."""
+        # 4 trajectories, 2 DP groups
+        traj_list = []
+        for i, sl in enumerate([128, 256, 64, 192]):
+            traj_list.append(
+                {
+                    "input_ids": RTensor(
+                        shard=TensorShardInfo(
+                            size=1, seqlens=[sl], shard_id=f"s{i}", node_addr="w0"
+                        ),
+                        data=torch.empty(0, device="meta"),
+                    ),
+                }
+            )
+
+        splits, group_indices = dispatch_traj_list(traj_list, dp_size=2)
+
+        # Simulate what each worker returns: an RTensor with aggregated seqlens
+        results = []
+        for group_trajs in splits:
+            worker_seqlens = []
+            for d in group_trajs:
+                for v in d.values():
+                    if isinstance(v, RTensor):
+                        worker_seqlens.extend(v.shard.seqlens)
+                        break
+            n_trajs = len(group_trajs)
+            results.append(
+                RTensor(
+                    shard=TensorShardInfo(
+                        size=n_trajs,
+                        seqlens=worker_seqlens,
+                        shard_id="result",
+                        node_addr="w0",
+                    ),
+                    data=torch.randn(n_trajs, 10),
+                )
+            )
+
+        # RTensors should be rejected by data_parallel_merge
+        with pytest.raises(TypeError, match="RTensors should not be merged"):
+            data_parallel_merge(results)
+
+
+class TestSplitResultToTrajList:
+    """Tests for split_result_to_traj_list."""
+
+    def test_split_tensor(self):
+        """Split a batched tensor into per-traj tensors."""
+        batched = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+        result = split_result_to_traj_list(batched, n_trajs=3)
+        assert isinstance(result, list)
+        assert len(result) == 3
+        torch.testing.assert_close(result[0], torch.tensor([[1.0, 2.0]]))
+        torch.testing.assert_close(result[2], torch.tensor([[5.0, 6.0]]))
+
+    def test_split_dict(self):
+        """Split a batched dict into per-traj dicts."""
+        batched = {
+            "logp": torch.tensor([1.0, 2.0]),
+            "values": torch.tensor([3.0, 4.0]),
+            "scalar": "shared",
+        }
+        result = split_result_to_traj_list(batched, n_trajs=2)
+        assert isinstance(result, list)
+        assert len(result) == 2
+        torch.testing.assert_close(result[0]["logp"], torch.tensor([1.0]))
+        torch.testing.assert_close(result[1]["values"], torch.tensor([4.0]))
+        assert result[0]["scalar"] == "shared"
+
+    def test_split_none(self):
+        """None input returns None."""
+        assert split_result_to_traj_list(None, n_trajs=3) is None
+
+    def test_split_passthrough(self):
+        """Non-tensor/dict/None input is returned as-is."""
+        assert split_result_to_traj_list(42, n_trajs=2) == 42
+
+
+class TestConcatTrajResults:
+    """Tests for concat_traj_results."""
+
+    def test_concat_tensor_list(self):
+        """Concat list[Tensor] back into single tensor."""
+        tensors = [torch.tensor([[1.0]]), torch.tensor([[2.0]]), torch.tensor([[3.0]])]
+        result = concat_traj_results(tensors)
+        torch.testing.assert_close(result, torch.tensor([[1.0], [2.0], [3.0]]))
+
+    def test_concat_dict_list(self):
+        """Concat list[dict] back into single dict."""
+        dicts = [
+            {"a": torch.tensor([[1.0]])},
+            {"a": torch.tensor([[2.0]])},
+        ]
+        result = concat_traj_results(dicts)
+        assert isinstance(result, dict)
+        torch.testing.assert_close(result["a"], torch.tensor([[1.0], [2.0]]))
+
+    def test_concat_none_list(self):
+        """List of Nones returns None."""
+        assert concat_traj_results([None, None]) is None
+
+    def test_concat_non_list(self):
+        """Non-list input passes through."""
+        t = torch.tensor([1.0])
+        assert concat_traj_results(t) is t
+
+    def test_concat_empty(self):
+        """Empty list passes through."""
+        assert concat_traj_results([]) == []
+
+    def test_roundtrip_tensor(self):
+        """split then concat is identity for tensors."""
+        original = torch.randn(4, 8)
+        split = split_result_to_traj_list(original, n_trajs=4)
+        restored = concat_traj_results(split)
+        torch.testing.assert_close(restored, original)
+
+    def test_roundtrip_dict(self):
+        """split then concat is identity for dicts."""
+        original = {"a": torch.randn(3, 5), "b": torch.randn(3, 2)}
+        split = split_result_to_traj_list(original, n_trajs=3)
+        restored = concat_traj_results(split)
+        torch.testing.assert_close(restored["a"], original["a"])
+        torch.testing.assert_close(restored["b"], original["b"])
+
+
+# =============================================================================
+# Wave 1 & 2 Fix Verification Tests
+# =============================================================================
+
+
+class TestConcatTrajDictsKeyValidation:
+    """Tests for M4: concat_traj_dicts key validation."""
+
+    def test_consistent_keys_succeeds(self):
+        """concat_traj_dicts works when all dicts have same keys."""
+        dicts = [{"a": torch.tensor([1, 2])}, {"a": torch.tensor([3, 4])}]
+        result = concat_traj_dicts(dicts)
+        assert "a" in result
+
+    def test_inconsistent_keys_raises(self):
+        """concat_traj_dicts raises ValueError on mismatched keys."""
+        dicts = [{"a": torch.tensor([1])}, {"b": torch.tensor([2])}]
+        with pytest.raises(ValueError):
+            concat_traj_dicts(dicts)
+
+    def test_extra_key_in_later_dict_raises(self):
+        """concat_traj_dicts raises ValueError when later dict has extra key."""
+        dicts = [
+            {"a": torch.tensor([1])},
+            {"a": torch.tensor([2]), "b": torch.tensor([3])},
+        ]
+        with pytest.raises(ValueError):
+            concat_traj_dicts(dicts)
+
+    def test_missing_key_in_later_dict_raises(self):
+        """concat_traj_dicts raises ValueError when later dict misses key."""
+        dicts = [
+            {"a": torch.tensor([1]), "b": torch.tensor([2])},
+            {"a": torch.tensor([3])},
+        ]
+        with pytest.raises(ValueError):
+            concat_traj_dicts(dicts)
+
+
+class TestSplitResultRefSafety:
+    """Tests for H3: split_result_to_traj_list reference safety."""
+
+    def test_non_tensor_values_are_copied(self):
+        """Non-tensor values in split results are copies, not shared references."""
+        shared_list = [1, 2, 3]
+        result = {"data": torch.tensor([[1.0], [2.0]]), "meta": shared_list}
+        splits = split_result_to_traj_list(result, n_trajs=2, traj_batch_size=1)
+        # Modifying one split's meta should not affect the other
+        splits[0]["meta"].append(99)
+        assert 99 not in splits[1]["meta"], (
+            "Non-tensor values should be independent copies"
+        )
+
+    def test_non_tensor_dict_values_are_copied(self):
+        """Non-tensor dict values should be shallow-copied per split."""
+        shared_dict = {"key": "value"}
+        result = {"data": torch.tensor([[1.0], [2.0]]), "config": shared_dict}
+        splits = split_result_to_traj_list(result, n_trajs=2, traj_batch_size=1)
+        # The config should be a copy, not the same object
+        assert splits[0]["config"] is not splits[1]["config"]
+
+    def test_scalar_values_preserved_across_splits(self):
+        """Scalar values should be preserved in all splits."""
+        result = {"data": torch.tensor([[1.0], [2.0]]), "count": 42}
+        splits = split_result_to_traj_list(result, n_trajs=2, traj_batch_size=1)
+        assert splits[0]["count"] == 42
+        assert splits[1]["count"] == 42
+
+
+class TestTrajListBatchConversion:
+    """Tests for M2: traj_list_to_batch and batch_to_traj_list."""
+
+    def test_traj_list_to_batch_basic(self):
+        """traj_list_to_batch concatenates trajectory dicts."""
+        from areal.utils.datapack import traj_list_to_batch
+
+        traj_list = [
+            {"input_ids": torch.tensor([[1, 2, 3]])},
+            {"input_ids": torch.tensor([[4, 5, 6]])},
+        ]
+        batched, traj_batch_size = traj_list_to_batch(traj_list)
+        assert batched["input_ids"].shape == (2, 3)
+        assert traj_batch_size == 1
+
+    def test_traj_list_to_batch_rejects_non_list(self):
+        """traj_list_to_batch raises AssertionError for non-list input."""
+        from areal.utils.datapack import traj_list_to_batch
+
+        with pytest.raises(AssertionError):
+            traj_list_to_batch({"a": 1})
+
+    def test_traj_list_to_batch_rejects_non_dict_elements(self):
+        """traj_list_to_batch raises AssertionError for list of non-dicts."""
+        from areal.utils.datapack import traj_list_to_batch
+
+        with pytest.raises(AssertionError):
+            traj_list_to_batch(["not", "dicts"])
+
+    def test_batch_to_traj_list_basic(self):
+        """batch_to_traj_list splits batched dict back into trajectory list."""
+        from areal.utils.datapack import batch_to_traj_list
+
+        batched = {"input_ids": torch.tensor([[1, 2], [3, 4]])}
+        splits = batch_to_traj_list(batched, n_trajs=2, traj_batch_size=1)
+        assert len(splits) == 2
+        assert splits[0]["input_ids"].shape == (1, 2)
+        assert splits[1]["input_ids"].shape == (1, 2)
+
+    def test_batch_to_traj_list_with_traj_batch_size(self):
+        """batch_to_traj_list handles traj_batch_size > 1 (group_size)."""
+        from areal.utils.datapack import batch_to_traj_list
+
+        batched = {"x": torch.tensor([[1], [2], [3], [4]])}
+        splits = batch_to_traj_list(batched, n_trajs=2, traj_batch_size=2)
+        assert len(splits) == 2
+        assert splits[0]["x"].shape == (2, 1)
+        assert splits[1]["x"].shape == (2, 1)
+
+    def test_roundtrip(self):
+        """traj_list_to_batch and batch_to_traj_list are inverses."""
+        from areal.utils.datapack import batch_to_traj_list, traj_list_to_batch
+
+        traj_list = [
+            {"x": torch.tensor([[1.0, 2.0]])},
+            {"x": torch.tensor([[3.0, 4.0]])},
+        ]
+        batched, traj_batch_size = traj_list_to_batch(traj_list)
+        recovered = batch_to_traj_list(
+            batched, n_trajs=2, traj_batch_size=traj_batch_size
+        )
+        assert len(recovered) == 2
+        torch.testing.assert_close(recovered[0]["x"], traj_list[0]["x"])
+        torch.testing.assert_close(recovered[1]["x"], traj_list[1]["x"])
+
+    def test_roundtrip_multiple_keys(self):
+        """Roundtrip preserves multiple keys per trajectory dict."""
+        from areal.utils.datapack import batch_to_traj_list, traj_list_to_batch
+
+        traj_list = [
+            {"a": torch.tensor([[1.0]]), "b": torch.tensor([[2.0]])},
+            {"a": torch.tensor([[3.0]]), "b": torch.tensor([[4.0]])},
+        ]
+        batched, traj_batch_size = traj_list_to_batch(traj_list)
+        recovered = batch_to_traj_list(
+            batched, n_trajs=2, traj_batch_size=traj_batch_size
+        )
+        assert len(recovered) == 2
+        torch.testing.assert_close(recovered[0]["a"], traj_list[0]["a"])
+        torch.testing.assert_close(recovered[0]["b"], traj_list[0]["b"])
+        torch.testing.assert_close(recovered[1]["a"], traj_list[1]["a"])
+        torch.testing.assert_close(recovered[1]["b"], traj_list[1]["b"])
+
+
+class TestDataParallelMergeTypes:
+    """Tests for M3: data_parallel_merge list/tuple handling."""
+
+    def test_merge_list_of_lists_preserves_type(self):
+        """data_parallel_merge preserves list type for list-of-lists."""
+        results = [[42], [43]]
+        merged = data_parallel_merge(results)
+        assert isinstance(merged, list)
+
+    def test_merge_list_of_tuples_preserves_type(self):
+        """data_parallel_merge preserves tuple type for list-of-tuples."""
+        results = [(42,), (43,)]
+        merged = data_parallel_merge(results)
+        assert isinstance(merged, tuple)
+
+    def test_merge_nested_lists(self):
+        """data_parallel_merge handles nested list structures."""
+        results = [[[1, 2]], [[3, 4]]]
+        merged = data_parallel_merge(results)
+        assert isinstance(merged, list)
+        assert isinstance(merged[0], list)
+
+    def test_merge_nested_tuples(self):
+        """data_parallel_merge handles nested tuple structures."""
+        results = [((1,), (2,)), ((3,), (4,))]
+        merged = data_parallel_merge(results)
+        assert isinstance(merged, tuple)
+
+    def test_merge_empty_returns_none(self):
+        """data_parallel_merge returns None for empty results."""
+        merged = data_parallel_merge([])
+        assert merged is None
+
+    def test_merge_dict_of_lists(self):
+        """data_parallel_merge handles dicts containing list values."""
+        results = [{"a": [1, 2]}, {"a": [3, 4]}]
+        merged = data_parallel_merge(results)
+        assert isinstance(merged, dict)
+        assert isinstance(merged["a"], list)
+
+
+class TestIsTrajList:
+    """Tests for H1: TrainController._is_traj_list tensor check."""
+
+    def test_rejects_non_tensor_dict_list(self):
+        """_is_traj_list returns False for list of dicts without tensor values."""
+        assert not TrainController._is_traj_list([{"key": "string_value"}])
+
+    def test_rejects_dict_with_int_values(self):
+        """_is_traj_list returns False for list of dicts with int values."""
+        assert not TrainController._is_traj_list([{"count": 42}])
+
+    def test_rejects_dict_with_nested_dict(self):
+        """_is_traj_list returns False for list of dicts with nested dict."""
+        assert not TrainController._is_traj_list([{"config": {"key": "value"}}])
+
+    def test_accepts_torch_tensor_dict_list(self):
+        """_is_traj_list returns True for list of dicts with torch.Tensor values."""
+        assert TrainController._is_traj_list([{"logits": torch.tensor([1.0])}])
+
+    def test_accepts_rtensor_dict_list(self):
+        """_is_traj_list returns True for list of dicts with RTensor values."""
+        shard = TensorShardInfo(size=1, seqlens=[5], shard_id="test", node_addr="")
+        rtensor = RTensor(shard=shard, data=torch.zeros(1, 5))
+        assert TrainController._is_traj_list([{"input_ids": rtensor}])
+
+    def test_rejects_empty_list(self):
+        """_is_traj_list returns False for empty list."""
+        assert not TrainController._is_traj_list([])
+
+    def test_rejects_non_list(self):
+        """_is_traj_list returns False for non-list input."""
+        assert not TrainController._is_traj_list({"key": "value"})
+
+    def test_rejects_list_of_non_dicts(self):
+        """_is_traj_list returns False for list of non-dicts."""
+        assert not TrainController._is_traj_list([1, 2, 3])
+
+    def test_accepts_dict_with_mixed_tensor_and_non_tensor(self):
+        """_is_traj_list returns True when at least one value is tensor."""
+        assert TrainController._is_traj_list(
+            [{"data": torch.tensor([1.0]), "meta": "string"}]
+        )
+
+
+class TestAggregateRTensorLayoutsNoRTensor:
+    """Tests for H2: _aggregate_traj_rtensor_layouts with no RTensor."""
+
+    def test_handles_dict_without_rtensor(self):
+        """_aggregate_traj_rtensor_layouts handles dicts without RTensor values."""
+        # Dict with only non-RTensor values should return list unchanged (recurse)
+        result = _aggregate_traj_rtensor_layouts([{"key": "string_value"}])
+        # When no RTensor found in first dict, it returns list as-is
+        assert isinstance(result, list)
+
+    def test_handles_nested_non_rtensor_structure(self):
+        """_aggregate_traj_rtensor_layouts handles nested structures without RTensor."""
+        nested = {"outer": [{"key": 42}]}
+        result = _aggregate_traj_rtensor_layouts(nested)
+        assert isinstance(result, dict)
+        assert "outer" in result
+
+    def test_handles_tuple_without_rtensor(self):
+        """_aggregate_traj_rtensor_layouts handles tuples without RTensor."""
+        result = _aggregate_traj_rtensor_layouts(({"a": 1}, {"b": 2}))
+        assert isinstance(result, tuple)
+
+    def test_returns_scalar_unchanged(self):
+        """_aggregate_traj_rtensor_layouts returns scalars unchanged."""
+        assert _aggregate_traj_rtensor_layouts(42) == 42
+        assert _aggregate_traj_rtensor_layouts("string") == "string"
+
+    def test_skips_dicts_without_rtensor_in_list(self):
+        """When some dicts in list lack RTensor, they contribute 0 seqlens."""
+        # Mixed list: one dict with RTensor, one without
+        shard = TensorShardInfo(size=1, seqlens=[100], shard_id="test", node_addr="")
+        rtensor = RTensor(shard=shard, data=torch.zeros(1, 100))
+        obj = [
+            {"input_ids": rtensor},
+            {"meta": "no rtensor here"},  # No RTensor in this dict
+        ]
+        result = _aggregate_traj_rtensor_layouts(obj)
+        # Result should be RTensor with only seqlens from first dict
+        assert isinstance(result, RTensor)
+        assert result.shard.seqlens == [100]
+        assert result.shard.size == 1

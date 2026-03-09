@@ -1633,16 +1633,14 @@ class FSDPPPOActor(FSDPEngine):
         super().__init__(config)
         self.actor = PPOActor(config, self)
 
-    @torch.no_grad()
-    def compute_logp(self, *args, **kwargs) -> torch.Tensor | None:
-        return self.actor.compute_logp(*args, **kwargs)
+    def compute_logp(self, data, *args, **kwargs):
+        return self.actor.compute_logp(data, *args, **kwargs)
 
-    @torch.no_grad()
-    def compute_advantages(self, *args, **kwargs) -> dict[str, Any]:
-        return self.actor.compute_advantages(*args, **kwargs)
+    def compute_advantages(self, data, *args, **kwargs):
+        return self.actor.compute_advantages(data, *args, **kwargs)
 
-    def ppo_update(self, *args, **kwargs) -> None:
-        self.actor.ppo_update(*args, **kwargs)
+    def ppo_update(self, data, *args, **kwargs) -> None:
+        self.actor.ppo_update(data, *args, **kwargs)
 
     @classmethod
     def as_controller(cls, config: PPOActorConfig, scheduler: Scheduler):
@@ -1660,12 +1658,11 @@ class FSDPPPOCritic(FSDPEngine):
         super().__init__(config)
         self.critic = PPOCritic(config, self)
 
-    @torch.no_grad()
-    def compute_values(self, *args, **kwargs) -> torch.Tensor:
-        return self.critic.compute_values(*args, **kwargs)
+    def compute_values(self, data, *args, **kwargs):
+        return self.critic.compute_values(data, *args, **kwargs)
 
-    def ppo_update(self, *args, **kwargs) -> None:
-        self.critic.ppo_update(*args, **kwargs)
+    def ppo_update(self, data, *args, **kwargs) -> None:
+        self.critic.ppo_update(data, *args, **kwargs)
 
     @classmethod
     def as_controller(cls, config: PPOCriticConfig, scheduler: Scheduler):
