@@ -141,6 +141,7 @@ RUN git clone https://github.com/fla-org/flash-linear-attention /flash-linear-at
     && rm -rf /flash-linear-attention
 
 # flash-attn 2: download pre-built wheel, strip local version, repack & install
+RUN uv pip install wheel  # ensure wheel is available for repacking
 RUN set -ex \
     && FA_VER="2.8.3" \
     && FA_RELEASE="v0.7.16" \
